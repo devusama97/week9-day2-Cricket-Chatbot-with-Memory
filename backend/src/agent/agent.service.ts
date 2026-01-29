@@ -11,14 +11,19 @@ import { SystemMessage, HumanMessage } from '@langchain/core/messages';
 // Define the state schema
 const AgentState = Annotation.Root({
     question: Annotation<string>(),
+    userId: Annotation<string>(), // Added for multi-user memory
     isCricketRelated: Annotation<boolean>(),
     isGreeting: Annotation<boolean>(),
     format: Annotation<string>(), // 'test', 'odi', 't20'
+    memorySummary: Annotation<string>(), // Perpetual summary
+    recentHistory: Annotation<string[]>(), // Last few messages
     query: Annotation<any>(),
     queryResults: Annotation<any[]>(),
     answer: Annotation<string>(),
     executionSteps: Annotation<string[]>(), // To track current node for UI
 });
+
+import { Conversation, Summary } from '../database/history.schema';
 
 @Injectable()
 export class AgentService {
@@ -30,6 +35,8 @@ export class AgentService {
         @InjectModel(TestPlayer.name) private testModel: Model<TestPlayer>,
         @InjectModel(OdiPlayer.name) private odiModel: Model<OdiPlayer>,
         @InjectModel(T20Player.name) private t20Model: Model<T20Player>,
+        @InjectModel(Conversation.name) private conversationModel: Model<Conversation>,
+        @InjectModel(Summary.name) private summaryModel: Model<Summary>,
     ) {
         const apiKey = this.configService.get('OPENROUTER_API_KEY') || this.configService.get('OPENAI_API_KEY');
         const modelName = this.configService.get('OPENROUTER_MODEL');
@@ -86,6 +93,28 @@ export class AgentService {
         }
     }
 
+    // Node: Memory Retriever
+    async memoryRetriever(state: typeof AgentState.State) {
+        try {
+            this.logger.log('Node: Memory Retriever');
+            const [summary, history] = await Promise.all([
+                this.summaryModel.findOne({ userId: state.userId }),
+                this.conversationModel.find({ userId: state.userId }).sort({ createdAt: -1 }).limit(10).lean()
+            ]);
+
+            const historyText = history.reverse().map(c => `User: ${c.question}\nAI: ${c.answer}`).join('\n\n');
+
+            return {
+                memorySummary: summary?.content || '',
+                recentHistory: historyText ? [historyText] : [],
+                executionSteps: [...(state.executionSteps || []), 'Memory Retriever']
+            };
+        } catch (error: any) {
+            this.logger.error(`Error in memoryRetriever: ${error.message}`);
+            return { executionSteps: [...(state.executionSteps || []), 'Memory Retriever (Failed)'] };
+        }
+    }
+
     // Node 2: Query Generator
     async queryGenerator(state: typeof AgentState.State) {
         try {
@@ -109,6 +138,9 @@ export class AgentService {
         Available fields in 'test': ${testKeys.join(', ')}
         Available fields in 'odi': ${odiKeys.join(', ')}
         Available fields in 't20': ${t20Keys.join(', ')}
+        
+        PERPETUAL SUMMARY: ${state.memorySummary || 'No past summary available.'}
+        RECENT CHAT HISTORY: ${state.recentHistory || 'No recent history.'}
         
         IMPORTANT:
         1. Use $regex with case-insensitive flag ('i') for player names because the database might have names in ALL CAPS or with country suffixes (e.g. 'V Kohli (INDIA)' or 'ROHIT SHARMA').
@@ -221,21 +253,74 @@ export class AgentService {
         }
     }
 
-    async *streamQuestion(question: string) {
+    // Node: Memory Saver
+    async memorySaver(state: typeof AgentState.State) {
+        try {
+            if (!state.userId || !state.answer) return state;
+
+            this.logger.log('Node: Memory Saver');
+
+            // Save new conversation entry
+            await this.conversationModel.create({
+                userId: state.userId,
+                question: state.question,
+                answer: state.answer
+            });
+
+            // Check if we need to summarize (e.g., if history count > 10)
+            const historyCount = await this.conversationModel.countDocuments({ userId: state.userId });
+            if (historyCount >= 10) {
+                this.logger.log('Triggering Summarization...');
+                const history = await this.conversationModel.find({ userId: state.userId }).sort({ createdAt: 1 }).lean();
+                const historyStr = history.map(h => `User: ${h.question}\nAI: ${h.answer}`).join('\n\n');
+
+                const summaryResponse = await this.model.invoke([
+                    new SystemMessage(`You are a memory manager. Summarize the following cricket conversation into a very concise paragraph. 
+                    Retain key facts like player names and specific stats mentioned. 
+                    Existing Summary: ${state.memorySummary || 'None'}`),
+                    new HumanMessage(`Conversation to include:\n${historyStr}`),
+                ]);
+
+                const newSummaryContent = summaryResponse.content as string;
+
+                await this.summaryModel.findOneAndUpdate(
+                    { userId: state.userId },
+                    { content: newSummaryContent },
+                    { upsert: true }
+                );
+
+                // Clear history to prevent it from growing indefinitely
+                await this.conversationModel.deleteMany({ userId: state.userId });
+
+                this.logger.log('Summarization complete.');
+            }
+
+            return { executionSteps: [...(state.executionSteps || []), 'Memory Saved'] };
+        } catch (error: any) {
+            this.logger.error(`Error in memorySaver: ${error.message}`);
+            return state;
+        }
+    }
+
+    async *streamQuestion(question: string, userId: string = 'default-user') {
         try {
             const workflow = new StateGraph(AgentState)
                 .addNode('check_relevancy', (s) => this.relevancyChecker(s))
+                .addNode('memory_retriever', (s) => this.memoryRetriever(s))
                 .addNode('generate_query', (s) => this.queryGenerator(s))
                 .addNode('execute_query', (s) => this.queryExecutor(s))
                 .addNode('format_answer', (s) => this.answerFormatter(s))
+                .addNode('memory_saver', (s) => this.memorySaver(s))
                 .addEdge(START, 'check_relevancy')
-                .addEdge('check_relevancy', 'generate_query')
+                .addEdge('check_relevancy', 'memory_retriever')
+                .addEdge('memory_retriever', 'generate_query')
                 .addEdge('generate_query', 'execute_query')
                 .addEdge('execute_query', 'format_answer')
-                .addEdge('format_answer', END);
+                .addEdge('format_answer', 'memory_saver')
+                .addEdge('memory_saver', END);
 
             const app = workflow.compile();
-            const stream = await app.stream({ question });
+            const stream = await app.stream({ question, userId: 'default-user' }); // Default userId for now
 
             for await (const chunk of stream) {
                 const nodeName = Object.keys(chunk)[0];

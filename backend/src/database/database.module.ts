@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TestPlayerSchema, OdiPlayerSchema, T20PlayerSchema } from './player.schema';
+import { ConversationSchema, SummarySchema } from './history.schema';
 
 @Module({
     imports: [
@@ -16,6 +17,8 @@ import { TestPlayerSchema, OdiPlayerSchema, T20PlayerSchema } from './player.sch
             { name: 'TestPlayer', schema: TestPlayerSchema },
             { name: 'OdiPlayer', schema: OdiPlayerSchema },
             { name: 'T20Player', schema: T20PlayerSchema },
+            { name: 'Conversation', schema: ConversationSchema },
+            { name: 'Summary', schema: SummarySchema },
         ]),
     ],
     exports: [MongooseModule],

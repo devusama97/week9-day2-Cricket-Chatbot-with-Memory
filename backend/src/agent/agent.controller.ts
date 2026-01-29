@@ -1,13 +1,23 @@
-import { Controller, Post, Body, Res } from '@nestjs/common';
+import { Controller, Post, Body, Res, Get, Param } from '@nestjs/common';
 import { AgentService } from './agent.service';
-import * as express from 'express';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Conversation, Summary } from '../database/history.schema';
 
-@Controller('ask')
+@Controller('agent')
 export class AgentController {
-    constructor(private readonly agentService: AgentService) { }
+    constructor(
+        private readonly agentService: AgentService,
+        @InjectModel(Conversation.name) private conversationModel: Model<Conversation>,
+        @InjectModel(Summary.name) private summaryModel: Model<Summary>,
+    ) { }
 
-    @Post()
-    async askQuestion(@Body('question') question: string, @Res() res: any): Promise<void> {
+    @Post('ask')
+    async askQuestion(
+        @Body('question') question: string,
+        @Body('userId') userId: string,
+        @Res() res: any
+    ): Promise<void> {
         res.setHeader('Content-Type', 'application/json');
         res.setHeader('Transfer-Encoding', 'chunked');
 
@@ -17,11 +27,9 @@ export class AgentController {
                 return res.end();
             }
 
-            const stream = this.agentService.streamQuestion(question);
+            const stream = this.agentService.streamQuestion(question, userId || 'default-user');
             for await (const chunk of stream) {
                 res.write(JSON.stringify(chunk) + '\n');
-                // Express usually flushes automatically for chunked encoding, 
-                // but some environments might need a hint.
             }
             res.end();
         } catch (error: any) {
@@ -29,5 +37,15 @@ export class AgentController {
             res.write(JSON.stringify({ error: error.message }) + '\n');
             res.end();
         }
+    }
+
+    @Get('history/:userId')
+    async getHistory(@Param('userId') userId: string) {
+        return this.conversationModel.find({ userId }).sort({ createdAt: -1 }).limit(50).lean();
+    }
+
+    @Get('summary/:userId')
+    async getSummary(@Param('userId') userId: string) {
+        return this.summaryModel.findOne({ userId }).lean();
     }
 }
