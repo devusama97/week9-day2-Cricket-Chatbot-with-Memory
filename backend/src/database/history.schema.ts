@@ -6,11 +6,17 @@ export class Conversation extends Document {
     @Prop({ required: true, index: true })
     userId: string;
 
+    @Prop({ required: true, index: true })
+    sessionId: string;
+
     @Prop({ required: true })
     question: string;
 
     @Prop({ required: true })
     answer: string;
+
+    @Prop({ type: [Object], required: false })
+    results: any[];
 }
 
 @Schema({ timestamps: true })

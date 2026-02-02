@@ -16,6 +16,7 @@ export class AgentController {
     async askQuestion(
         @Body('question') question: string,
         @Body('userId') userId: string,
+        @Body('sessionId') sessionId: string,
         @Res() res: any
     ): Promise<void> {
         res.setHeader('Content-Type', 'application/json');
@@ -27,7 +28,7 @@ export class AgentController {
                 return res.end();
             }
 
-            const stream = this.agentService.streamQuestion(question, userId || 'default-user');
+            const stream = this.agentService.streamQuestion(question, userId || 'default-user', sessionId || 'default-session');
             for await (const chunk of stream) {
                 res.write(JSON.stringify(chunk) + '\n');
             }
@@ -39,9 +40,32 @@ export class AgentController {
         }
     }
 
-    @Get('history/:userId')
-    async getHistory(@Param('userId') userId: string) {
-        return this.conversationModel.find({ userId }).sort({ createdAt: -1 }).limit(50).lean();
+    @Get('sessions/:userId')
+    async getSessions(@Param('userId') userId: string) {
+        // Return latest conversation for each sessionId to get a 'title' (the first question)
+        const sessions = await this.conversationModel.aggregate([
+            { $match: { userId } },
+            { $sort: { createdAt: 1 } },
+            {
+                $group: {
+                    _id: '$sessionId',
+                    title: { $first: '$question' },
+                    lastMessageAt: { $last: '$createdAt' }
+                }
+            },
+            { $sort: { lastMessageAt: -1 } }
+        ]);
+        return sessions;
+    }
+
+    @Get('messages/:sessionId')
+    async getMessages(@Param('sessionId') sessionId: string) {
+        return this.conversationModel.find({ sessionId }).sort({ createdAt: 1 }).lean();
+    }
+
+    @Post('sessions/delete/:sessionId') // Using Post or Delete, standardizing on Delete would be better but keeping simple
+    async deleteSession(@Param('sessionId') sessionId: string) {
+        return this.conversationModel.deleteMany({ sessionId });
     }
 
     @Get('summary/:userId')

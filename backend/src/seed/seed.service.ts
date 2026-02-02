@@ -17,7 +17,7 @@ export class SeedService {
     ) { }
 
     async seedData() {
-        const dataPath = path.join(__dirname, '..', '..', '..', 'data');
+        const dataPath = path.join(__dirname, '..', '..', 'data');
 
         const formats = [
             { file: 'test_players.csv', model: this.testModel, name: 'Test' },

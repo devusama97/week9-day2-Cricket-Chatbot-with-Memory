@@ -1,6 +1,8 @@
 'use client';
 
 import React, { useState, useRef, useEffect, memo } from 'react';
+import { useTheme } from '@mui/material/styles';
+import useMediaQuery from '@mui/material/useMediaQuery';
 import {
     Box,
     Container,
@@ -16,12 +18,22 @@ import {
     ListItemText,
     Divider,
     Drawer,
-    ListSubheader
+    ListSubheader,
+    ListItemIcon,
+    Dialog,
+    DialogTitle,
+    DialogContent,
+    DialogContentText,
+    DialogActions
 } from '@mui/material';
 import HistoryIcon from '@mui/icons-material/History';
 import MemoryIcon from '@mui/icons-material/Memory';
+import AddIcon from '@mui/icons-material/Add';
+import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
+import DeleteIcon from '@mui/icons-material/Delete';
 import SendIcon from '@mui/icons-material/Send';
 import BoltIcon from '@mui/icons-material/Bolt';
+import MenuIcon from '@mui/icons-material/Menu';
 import axios from 'axios';
 import FlowVisualizer from './FlowVisualizer';
 import DataTable from './DataTable';
@@ -68,12 +80,17 @@ const ChatInput = React.memo(({ onSend, disabled }: { onSend: (val: string) => v
 ChatInput.displayName = 'ChatInput';
 
 const ChatInterface = () => {
+    const theme = useTheme();
+    const isMobile = useMediaQuery(theme.breakpoints.down('md'));
     const [messages, setMessages] = useState<Message[]>([]);
     const [isProcessing, setIsProcessing] = useState(false);
     const [currentSteps, setCurrentSteps] = useState<string[]>([]);
-    const [history, setHistory] = useState<any[]>([]);
-    const [summary, setSummary] = useState<string>('');
-    const [userId] = useState('default-user'); // In real app, this comes from auth
+    const [sessions, setSessions] = useState<any[]>([]);
+    const [userId] = useState('default-user');
+    const [sessionId, setSessionId] = useState(`session-${Date.now()}`);
+    const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+    const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
+    const [mobileOpen, setMobileOpen] = useState(false);
     const messagesEndRef = useRef<null | HTMLDivElement>(null);
 
     const scrollToBottom = () => {
@@ -85,27 +102,64 @@ const ChatInterface = () => {
     }, [messages, currentSteps]);
 
     useEffect(() => {
-        fetchMemory();
+        fetchSessions();
     }, [userId]);
 
-    const fetchMemory = async () => {
+    const fetchSessions = async () => {
         try {
             const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
-            const [histRes, sumRes] = await Promise.all([
-                axios.get(`${apiUrl}/agent/history/${userId}`),
-                axios.get(`${apiUrl}/agent/summary/${userId}`)
-            ]);
-            setHistory(histRes.data);
-            setSummary(sumRes.data?.content || '');
+            const res = await axios.get(`${apiUrl}/agent/sessions/${userId}`);
+            setSessions(res.data);
+        } catch (err) {
+            console.error('Failed to fetch sessions:', err);
+        }
+    };
 
+    const handleDrawerToggle = () => {
+        setMobileOpen(!mobileOpen);
+    };
+
+    const startNewChat = () => {
+        setSessionId(`session-${Date.now()}`);
+        setMessages([]);
+        setCurrentSteps([]);
+        if (isMobile) setMobileOpen(false);
+    };
+
+    const switchSession = async (sid: string) => {
+        setSessionId(sid);
+        setCurrentSteps([]);
+        if (isMobile) setMobileOpen(false);
+        try {
+            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+            const res = await axios.get(`${apiUrl}/agent/messages/${sid}`);
             // Map history to messages
-            const historyMsgs: Message[] = histRes.data.reverse().flatMap((h: any) => [
+            const historyMsgs: Message[] = res.data.flatMap((h: any) => [
                 { role: 'user', content: h.question },
-                { role: 'assistant', content: h.answer }
+                { role: 'assistant', content: h.answer, results: h.results }
             ]);
             setMessages(historyMsgs);
         } catch (err) {
-            console.error('Failed to fetch memory:', err);
+            console.error('Failed to load session:', err);
+        }
+    };
+
+    const handleDeleteSession = async () => {
+        if (!sessionToDelete) return;
+
+        try {
+            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+            await axios.post(`${apiUrl}/agent/sessions/delete/${sessionToDelete}`);
+
+            if (sessionId === sessionToDelete) {
+                startNewChat();
+            }
+
+            fetchSessions();
+            setIsDeleteDialogOpen(false);
+            setSessionToDelete(null);
+        } catch (err) {
+            console.error('Failed to delete session:', err);
         }
     };
 
@@ -122,7 +176,7 @@ const ChatInterface = () => {
             const response = await fetch(`${apiUrl}/agent/ask`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ question, userId }),
+                body: JSON.stringify({ question, userId, sessionId }),
             });
 
             if (!response.body) return;
@@ -130,7 +184,7 @@ const ChatInterface = () => {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let accumulatedData = '';
-            let lastState: any = null;
+            let lastState: any = {};
 
             while (true) {
                 const { value, done } = await reader.read();
@@ -146,7 +200,7 @@ const ChatInterface = () => {
                     if (!line.trim()) continue;
                     try {
                         const chunk = JSON.parse(line);
-                        lastState = chunk;
+                        lastState = { ...lastState, ...chunk };
                         if (chunk.executionSteps) {
                             // This will update the UI in real-time
                             setCurrentSteps(chunk.executionSteps);
@@ -175,7 +229,7 @@ const ChatInterface = () => {
         } finally {
             setIsProcessing(false);
             setCurrentSteps([]);
-            fetchMemory(); // Refresh history/summary panel after message
+            fetchSessions(); // Refresh session list
         }
     };
 
@@ -191,9 +245,14 @@ const ChatInterface = () => {
 
     return (
         <Box sx={{ display: 'flex' }}>
-            {/* Memory Drawer */}
+            {/* Session Drawer */}
             <Drawer
-                variant="permanent"
+                variant={isMobile ? 'temporary' : 'permanent'}
+                open={isMobile ? mobileOpen : true}
+                onClose={handleDrawerToggle}
+                ModalProps={{
+                    keepMounted: true, // Better mobile performance
+                }}
                 sx={{
                     width: 280,
                     flexShrink: 0,
@@ -201,39 +260,80 @@ const ChatInterface = () => {
                         width: 280,
                         boxSizing: 'border-box',
                         bgcolor: 'background.paper',
-                        borderRight: '1px solid rgba(255,255,255,0.05)'
+                        borderRight: '1px solid rgba(255,255,255,0.05)',
+                        display: 'flex',
+                        flexDirection: 'column'
                     },
                 }}
             >
                 <Box sx={{ p: 2, mt: 8 }}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
-                        <MemoryIcon color="secondary" />
-                        <Typography variant="h6" fontWeight={600}>AI Memory</Typography>
-                    </Box>
-                    <Paper sx={{ p: 2, bgcolor: 'rgba(255,255,255,0.03)', borderRadius: 2, mb: 4 }}>
-                        <Typography variant="caption" color="text.secondary" display="block" gutterBottom>
-                            CURRENT SUMMARY
-                        </Typography>
-                        <Typography variant="body2" sx={{ fontStyle: 'italic', color: 'text.secondary' }}>
-                            {summary || 'No summary yet. Keep chatting to build context!'}
-                        </Typography>
-                    </Paper>
+                    <Button
+                        fullWidth
+                        variant="outlined"
+                        startIcon={<AddIcon />}
+                        onClick={startNewChat}
+                        sx={{
+                            mb: 4,
+                            borderRadius: 3,
+                            py: 1.5,
+                            borderColor: 'rgba(255,255,255,0.1)',
+                            color: 'text.primary',
+                            '&:hover': { borderColor: 'primary.main', bgcolor: 'rgba(255,255,255,0.05)' }
+                        }}
+                    >
+                        New Chat
+                    </Button>
 
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
-                        <HistoryIcon color="primary" />
-                        <Typography variant="h6" fontWeight={600}>Past Context</Typography>
-                    </Box>
-                    <List subheader={<li />}>
-                        {history.length === 0 ? (
-                            <Typography variant="body2" color="text.secondary" sx={{ px: 2 }}>No recent questions.</Typography>
+                    <Typography variant="caption" color="text.secondary" sx={{ px: 1, textTransform: 'uppercase', letterSpacing: 1 }}>
+                        Recent Chats
+                    </Typography>
+
+                    <List sx={{ mt: 1 }}>
+                        {sessions.length === 0 ? (
+                            <Typography variant="body2" color="text.secondary" sx={{ px: 2, mt: 2 }}>No recent chats.</Typography>
                         ) : (
-                            history.map((h, i) => (
-                                <ListItem key={i} sx={{ px: 2, py: 1 }}>
-                                    <ListItemText
-                                        primary={h.question}
-                                        primaryTypographyProps={{ variant: 'body2', noWrap: true, color: 'text.primary' }}
-                                        secondary={new Date(h.createdAt).toLocaleTimeString()}
-                                    />
+                            sessions.map((s, i) => (
+                                <ListItem
+                                    key={s._id}
+                                    disablePadding
+                                    sx={{
+                                        mb: 0.5,
+                                        borderRadius: 2,
+                                        bgcolor: sessionId === s._id ? 'rgba(255,255,255,0.08)' : 'transparent',
+                                        '&:hover': { bgcolor: 'rgba(255,255,255,0.05)' }
+                                    }}
+                                >
+                                    <Button
+                                        fullWidth
+                                        onClick={() => switchSession(s._id)}
+                                        sx={{
+                                            justifyContent: 'flex-start',
+                                            color: sessionId === s._id ? 'white' : 'text.secondary',
+                                            textTransform: 'none',
+                                            px: 2,
+                                            py: 1
+                                        }}
+                                        startIcon={<ChatBubbleOutlineIcon fontSize="small" />}
+                                    >
+                                        <Typography variant="body2" noWrap sx={{ maxWidth: 140 }}>
+                                            {s.title}
+                                        </Typography>
+                                    </Button>
+                                    <IconButton
+                                        size="small"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setSessionToDelete(s._id);
+                                            setIsDeleteDialogOpen(true);
+                                        }}
+                                        sx={{
+                                            mr: 1,
+                                            color: 'text.secondary',
+                                            '&:hover': { color: 'error.main' }
+                                        }}
+                                    >
+                                        <DeleteIcon fontSize="inherit" />
+                                    </IconButton>
                                 </ListItem>
                             ))
                         )}
@@ -241,16 +341,28 @@ const ChatInterface = () => {
                 </Box>
             </Drawer>
 
-            <Container maxWidth="md" sx={{ height: '100vh', display: 'flex', flexDirection: 'column', py: 4, flexGrow: 1 }}>
+            <Container maxWidth="md" sx={{ height: '100vh', display: 'flex', flexDirection: 'column', py: { xs: 2, md: 4 }, flexGrow: 1 }}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <BoltIcon color="primary" sx={{ fontSize: 32 }} />
-                        <Typography variant="h5" fontWeight={700}>Cricket Stats Agent</Typography>
+                        {isMobile && (
+                            <IconButton
+                                color="inherit"
+                                aria-label="open drawer"
+                                edge="start"
+                                onClick={handleDrawerToggle}
+                                sx={{ mr: 1 }}
+                            >
+                                <MenuIcon />
+                            </IconButton>
+                        )}
+                        <BoltIcon color="primary" sx={{ fontSize: { xs: 24, md: 32 } }} />
+                        <Typography variant="h5" fontWeight={700} sx={{ fontSize: { xs: '1rem', md: '1.5rem' } }}>Cricket Stats Agent</Typography>
                     </Box>
                     <Button variant="outlined" size="small" onClick={handleSeed}>Seed Data</Button>
                 </Box>
 
                 <Box sx={{ flexGrow: 1, overflowY: 'auto', mb: 3, pr: 1 }}>
+
                     {messages.map((msg, i) => (
                         <Box key={i} sx={{ mb: 3, display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
                             <Box sx={{ display: 'flex', gap: 2, maxWidth: '80%' }}>
@@ -281,6 +393,28 @@ const ChatInterface = () => {
 
                 <ChatInput onSend={handleSend} disabled={isProcessing} />
             </Container>
+
+            {/* Delete Confirmation Dialog */}
+            <Dialog
+                open={isDeleteDialogOpen}
+                onClose={() => setIsDeleteDialogOpen(false)}
+                PaperProps={{
+                    sx: { bgcolor: 'background.paper', borderRadius: 4, minWidth: 320 }
+                }}
+            >
+                <DialogTitle sx={{ fontWeight: 600 }}>Delete Chat?</DialogTitle>
+                <DialogContent>
+                    <DialogContentText color="text.secondary">
+                        Are you sure you want to delete this conversation? This action cannot be undone.
+                    </DialogContentText>
+                </DialogContent>
+                <DialogActions sx={{ p: 2, pt: 0 }}>
+                    <Button onClick={() => setIsDeleteDialogOpen(false)} color="inherit">Cancel</Button>
+                    <Button onClick={handleDeleteSession} variant="contained" color="error" sx={{ borderRadius: 2 }}>
+                        Delete
+                    </Button>
+                </DialogActions>
+            </Dialog>
         </Box>
     );
 };

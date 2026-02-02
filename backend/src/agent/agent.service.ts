@@ -11,7 +11,8 @@ import { SystemMessage, HumanMessage } from '@langchain/core/messages';
 // Define the state schema
 const AgentState = Annotation.Root({
     question: Annotation<string>(),
-    userId: Annotation<string>(), // Added for multi-user memory
+    userId: Annotation<string>(),
+    sessionId: Annotation<string>(), // Added for threading
     isCricketRelated: Annotation<boolean>(),
     isGreeting: Annotation<boolean>(),
     format: Annotation<string>(), // 'test', 'odi', 't20'
@@ -96,10 +97,10 @@ export class AgentService {
     // Node: Memory Retriever
     async memoryRetriever(state: typeof AgentState.State) {
         try {
-            this.logger.log('Node: Memory Retriever');
+            this.logger.log(`Node: Memory Retriever (Session: ${state.sessionId})`);
             const [summary, history] = await Promise.all([
-                this.summaryModel.findOne({ userId: state.userId }),
-                this.conversationModel.find({ userId: state.userId }).sort({ createdAt: -1 }).limit(10).lean()
+                this.summaryModel.findOne({ userId: state.userId }), // Global user context
+                this.conversationModel.find({ sessionId: state.sessionId }).sort({ createdAt: -1 }).limit(10).lean()
             ]);
 
             const historyText = history.reverse().map(c => `User: ${c.question}\nAI: ${c.answer}`).join('\n\n');
@@ -230,12 +231,13 @@ export class AgentService {
             const prompt = isSingle
                 ? `You are a cricket stats presenter. The search returned only ONE player. 
                    Provide a natural, friendly plain text response including all their key stats (Runs, Avg, SR, etc.). 
-                   Do NOT mention any lists or tables.
+                   Do NOT mention any lists or tables. Just a smooth descriptive paragraph.
                    Note: Player names in the data might have country suffixes like '(INDIA)' or '(PAK)'. Feel free to clean these for the final response.
                    Data: ${JSON.stringify(state.queryResults[0])}`
                 : `You are a cricket stats presenter. The search returned MULTIPLE players. 
-                   Provide a brief summary of who was found. 
-                   Mention that "the detailed list is provided below" (the frontend will show a table).
+                   Provide a VERY BRIEF summary of who was found (e.g. "I found 5 players with over 5000 runs"). 
+                   Say that "the detailed list is provided in the table below".
+                   CRITICAL: Do NOT list the players or their stats in your text response, because the frontend table will show all of them. ONLY provide the summary text.
                    Data: ${JSON.stringify(state.queryResults)}`;
 
             const response = await this.model.invoke([
@@ -258,27 +260,31 @@ export class AgentService {
         try {
             if (!state.userId || !state.answer) return state;
 
-            this.logger.log('Node: Memory Saver');
+            this.logger.log(`Node: Memory Saver (Session: ${state.sessionId})`);
 
             // Save new conversation entry
             await this.conversationModel.create({
                 userId: state.userId,
+                sessionId: state.sessionId,
                 question: state.question,
-                answer: state.answer
+                answer: state.answer,
+                results: state.queryResults
             });
 
             // Check if we need to summarize (e.g., if history count > 10)
             const historyCount = await this.conversationModel.countDocuments({ userId: state.userId });
             if (historyCount >= 10) {
                 this.logger.log('Triggering Summarization...');
+
+                // Fetch everything to summarize
                 const history = await this.conversationModel.find({ userId: state.userId }).sort({ createdAt: 1 }).lean();
                 const historyStr = history.map(h => `User: ${h.question}\nAI: ${h.answer}`).join('\n\n');
 
                 const summaryResponse = await this.model.invoke([
                     new SystemMessage(`You are a memory manager. Summarize the following cricket conversation into a very concise paragraph. 
-                    Retain key facts like player names and specific stats mentioned. 
+                    Include player names and key stats mentioned so far.
                     Existing Summary: ${state.memorySummary || 'None'}`),
-                    new HumanMessage(`Conversation to include:\n${historyStr}`),
+                    new HumanMessage(`New Conversation to summarize:\n${historyStr}`),
                 ]);
 
                 const newSummaryContent = summaryResponse.content as string;
@@ -289,10 +295,21 @@ export class AgentService {
                     { upsert: true }
                 );
 
-                // Clear history to prevent it from growing indefinitely
-                await this.conversationModel.deleteMany({ userId: state.userId });
+                // Keep the last 3 most recent messages, delete others
+                const recentMessages = await this.conversationModel.find({ userId: state.userId })
+                    .sort({ createdAt: -1 })
+                    .limit(3)
+                    .select('_id')
+                    .lean();
 
-                this.logger.log('Summarization complete.');
+                const recentIds = recentMessages.map(m => m._id);
+
+                await this.conversationModel.deleteMany({
+                    userId: state.userId,
+                    _id: { $nin: recentIds }
+                });
+
+                this.logger.log('Summarization complete. Kept 3 recent messages.');
             }
 
             return { executionSteps: [...(state.executionSteps || []), 'Memory Saved'] };
@@ -302,7 +319,7 @@ export class AgentService {
         }
     }
 
-    async *streamQuestion(question: string, userId: string = 'default-user') {
+    async *streamQuestion(question: string, userId: string = 'default-user', sessionId: string = 'default-session') {
         try {
             const workflow = new StateGraph(AgentState)
                 .addNode('check_relevancy', (s) => this.relevancyChecker(s))
@@ -320,7 +337,7 @@ export class AgentService {
                 .addEdge('memory_saver', END);
 
             const app = workflow.compile();
-            const stream = await app.stream({ question, userId: 'default-user' }); // Default userId for now
+            const stream = await app.stream({ question, userId, sessionId });
 
             for await (const chunk of stream) {
                 const nodeName = Object.keys(chunk)[0];
