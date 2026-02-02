@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect, memo } from 'react';
+import { useRouter } from 'next/navigation';
 import { useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
 import {
@@ -24,7 +25,10 @@ import {
     DialogTitle,
     DialogContent,
     DialogContentText,
-    DialogActions
+    DialogActions,
+    Menu,
+    MenuItem,
+    Tooltip
 } from '@mui/material';
 import HistoryIcon from '@mui/icons-material/History';
 import MemoryIcon from '@mui/icons-material/Memory';
@@ -34,9 +38,14 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import SendIcon from '@mui/icons-material/Send';
 import BoltIcon from '@mui/icons-material/Bolt';
 import MenuIcon from '@mui/icons-material/Menu';
+import AccountCircleIcon from '@mui/icons-material/AccountCircle';
+import LogoutIcon from '@mui/icons-material/Logout';
+import PersonIcon from '@mui/icons-material/Person';
 import axios from 'axios';
 import FlowVisualizer from './FlowVisualizer';
 import DataTable from './DataTable';
+import { config } from '../config';
+import { useAuth } from '../context/AuthContext';
 
 interface Message {
     role: 'user' | 'assistant';
@@ -82,15 +91,17 @@ ChatInput.displayName = 'ChatInput';
 const ChatInterface = () => {
     const theme = useTheme();
     const isMobile = useMediaQuery(theme.breakpoints.down('md'));
+    const { isAuthenticated, user, logout, token } = useAuth();
     const [messages, setMessages] = useState<Message[]>([]);
     const [isProcessing, setIsProcessing] = useState(false);
     const [currentSteps, setCurrentSteps] = useState<string[]>([]);
     const [sessions, setSessions] = useState<any[]>([]);
-    const [userId] = useState('default-user');
     const [sessionId, setSessionId] = useState(`session-${Date.now()}`);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
     const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
     const [mobileOpen, setMobileOpen] = useState(false);
+    const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
+    const router = useRouter();
     const messagesEndRef = useRef<null | HTMLDivElement>(null);
 
     const scrollToBottom = () => {
@@ -102,13 +113,15 @@ const ChatInterface = () => {
     }, [messages, currentSteps]);
 
     useEffect(() => {
-        fetchSessions();
-    }, [userId]);
+        if (isAuthenticated) {
+            fetchSessions();
+        }
+    }, [isAuthenticated]);
 
     const fetchSessions = async () => {
         try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
-            const res = await axios.get(`${apiUrl}/agent/sessions/${userId}`);
+            const apiUrl = config.api.baseUrl;
+            const res = await axios.get(`${apiUrl}/agent/sessions`);
             setSessions(res.data);
         } catch (err) {
             console.error('Failed to fetch sessions:', err);
@@ -131,7 +144,7 @@ const ChatInterface = () => {
         setCurrentSteps([]);
         if (isMobile) setMobileOpen(false);
         try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+            const apiUrl = config.api.baseUrl;
             const res = await axios.get(`${apiUrl}/agent/messages/${sid}`);
             // Map history to messages
             const historyMsgs: Message[] = res.data.flatMap((h: any) => [
@@ -148,7 +161,7 @@ const ChatInterface = () => {
         if (!sessionToDelete) return;
 
         try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+            const apiUrl = config.api.baseUrl;
             await axios.post(`${apiUrl}/agent/sessions/delete/${sessionToDelete}`);
 
             if (sessionId === sessionToDelete) {
@@ -164,20 +177,34 @@ const ChatInterface = () => {
     };
 
     const handleSend = async (question: string) => {
+        if (!isAuthenticated) {
+            router.push('/login');
+            return;
+        }
+
         const userMsg: Message = { role: 'user', content: question };
         setMessages(prev => [...prev, userMsg]);
         setIsProcessing(true);
         setCurrentSteps([]);
 
         try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+            const apiUrl = config.api.baseUrl;
 
             // Use fetch for streaming
             const response = await fetch(`${apiUrl}/agent/ask`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ question, userId, sessionId }),
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ question, sessionId }),
             });
+
+            if (response.status === 401) {
+                logout();
+                router.push('/login');
+                return;
+            }
 
             if (!response.body) return;
 
@@ -231,6 +258,20 @@ const ChatInterface = () => {
             setCurrentSteps([]);
             fetchSessions(); // Refresh session list
         }
+    };
+
+    const handleMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
+        setAnchorEl(event.currentTarget);
+    };
+
+    const handleMenuClose = () => {
+        setAnchorEl(null);
+    };
+
+    const handleLogout = () => {
+        handleMenuClose();
+        logout();
+        router.push('/login');
     };
 
     const handleSeed = async () => {
@@ -358,7 +399,84 @@ const ChatInterface = () => {
                         <BoltIcon color="primary" sx={{ fontSize: { xs: 24, md: 32 } }} />
                         <Typography variant="h5" fontWeight={700} sx={{ fontSize: { xs: '1rem', md: '1.5rem' } }}>Cricket Stats Agent</Typography>
                     </Box>
-                    <Button variant="outlined" size="small" onClick={handleSeed}>Seed Data</Button>
+                    <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
+                        <Button variant="outlined" size="small" onClick={handleSeed} sx={{ display: { xs: 'none', sm: 'inline-flex' } }}>Seed Data</Button>
+                        {isAuthenticated ? (
+                            <>
+                                <Tooltip title="Account settings">
+                                    <IconButton
+                                        onClick={handleMenuOpen}
+                                        size="small"
+                                        sx={{ ml: 2 }}
+                                        aria-controls={Boolean(anchorEl) ? 'account-menu' : undefined}
+                                        aria-haspopup="true"
+                                        aria-expanded={Boolean(anchorEl) ? 'true' : undefined}
+                                    >
+                                        <Avatar sx={{
+                                            width: 32,
+                                            height: 32,
+                                            bgcolor: 'primary.main',
+                                            boxShadow: '0 0 10px rgba(33, 150, 243, 0.3)'
+                                        }}>
+                                            {user?.username?.charAt(0).toUpperCase() || 'U'}
+                                        </Avatar>
+                                    </IconButton>
+                                </Tooltip>
+                                <Menu
+                                    anchorEl={anchorEl}
+                                    id="account-menu"
+                                    open={Boolean(anchorEl)}
+                                    onClose={handleMenuClose}
+                                    onClick={handleMenuClose}
+                                    PaperProps={{
+                                        elevation: 0,
+                                        sx: {
+                                            overflow: 'visible',
+                                            filter: 'drop-shadow(0px 2px 8px rgba(0,0,0,0.32))',
+                                            mt: 1.5,
+                                            bgcolor: 'background.paper',
+                                            borderRadius: 3,
+                                            '& .MuiAvatar-root': {
+                                                width: 32,
+                                                height: 32,
+                                                ml: -0.5,
+                                                mr: 1,
+                                            },
+                                        },
+                                    }}
+                                    transformOrigin={{ horizontal: 'right', vertical: 'top' }}
+                                    anchorOrigin={{ horizontal: 'right', vertical: 'bottom' }}
+                                >
+                                    <Box sx={{ px: 2, py: 1.5 }}>
+                                        <Typography variant="subtitle2" fontWeight={700}>{user?.username}</Typography>
+                                        <Typography variant="caption" color="text.secondary">{user?.email}</Typography>
+                                    </Box>
+                                    <Divider />
+                                    <MenuItem onClick={handleMenuClose}>
+                                        <ListItemIcon>
+                                            <PersonIcon fontSize="small" />
+                                        </ListItemIcon>
+                                        Profile
+                                    </MenuItem>
+                                    <MenuItem onClick={handleLogout}>
+                                        <ListItemIcon>
+                                            <LogoutIcon fontSize="small" />
+                                        </ListItemIcon>
+                                        Logout
+                                    </MenuItem>
+                                </Menu>
+                            </>
+                        ) : (
+                            <Button
+                                variant="contained"
+                                size="small"
+                                onClick={() => router.push('/login')}
+                                sx={{ borderRadius: 2, px: 3 }}
+                            >
+                                Login
+                            </Button>
+                        )}
+                    </Box>
                 </Box>
 
                 <Box sx={{ flexGrow: 1, overflowY: 'auto', mb: 3, pr: 1 }}>

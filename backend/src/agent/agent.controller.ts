@@ -1,10 +1,12 @@
-import { Controller, Post, Body, Res, Get, Param } from '@nestjs/common';
+import { Controller, Post, Body, Res, Get, Param, UseGuards, Request } from '@nestjs/common';
 import { AgentService } from './agent.service';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Conversation, Summary } from '../database/history.schema';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @Controller('agent')
+@UseGuards(JwtAuthGuard)
 export class AgentController {
     constructor(
         private readonly agentService: AgentService,
@@ -15,8 +17,8 @@ export class AgentController {
     @Post('ask')
     async askQuestion(
         @Body('question') question: string,
-        @Body('userId') userId: string,
         @Body('sessionId') sessionId: string,
+        @Request() req: any,
         @Res() res: any
     ): Promise<void> {
         res.setHeader('Content-Type', 'application/json');
@@ -28,7 +30,8 @@ export class AgentController {
                 return res.end();
             }
 
-            const stream = this.agentService.streamQuestion(question, userId || 'default-user', sessionId || 'default-session');
+            const userId = req.user.userId;
+            const stream = this.agentService.streamQuestion(question, userId, sessionId || `session-${Date.now()}`);
             for await (const chunk of stream) {
                 res.write(JSON.stringify(chunk) + '\n');
             }
@@ -40,8 +43,9 @@ export class AgentController {
         }
     }
 
-    @Get('sessions/:userId')
-    async getSessions(@Param('userId') userId: string) {
+    @Get('sessions')
+    async getSessions(@Request() req: any) {
+        const userId = req.user.userId;
         // Return latest conversation for each sessionId to get a 'title' (the first question)
         const sessions = await this.conversationModel.aggregate([
             { $match: { userId } },
@@ -59,17 +63,20 @@ export class AgentController {
     }
 
     @Get('messages/:sessionId')
-    async getMessages(@Param('sessionId') sessionId: string) {
-        return this.conversationModel.find({ sessionId }).sort({ createdAt: 1 }).lean();
+    async getMessages(@Param('sessionId') sessionId: string, @Request() req: any) {
+        const userId = req.user.userId;
+        return this.conversationModel.find({ sessionId, userId }).sort({ createdAt: 1 }).lean();
     }
 
     @Post('sessions/delete/:sessionId') // Using Post or Delete, standardizing on Delete would be better but keeping simple
-    async deleteSession(@Param('sessionId') sessionId: string) {
-        return this.conversationModel.deleteMany({ sessionId });
+    async deleteSession(@Param('sessionId') sessionId: string, @Request() req: any) {
+        const userId = req.user.userId;
+        return this.conversationModel.deleteMany({ sessionId, userId });
     }
 
-    @Get('summary/:userId')
-    async getSummary(@Param('userId') userId: string) {
+    @Get('summary')
+    async getSummary(@Request() req: any) {
+        const userId = req.user.userId;
         return this.summaryModel.findOne({ userId }).lean();
     }
 }
